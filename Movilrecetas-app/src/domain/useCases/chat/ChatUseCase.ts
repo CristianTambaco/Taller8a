@@ -1,11 +1,13 @@
+// src/domain/useCases/chat/ChatUseCase.ts
 import { supabase } from "@/src/data/services/supabaseClient";
 import { Mensaje } from "../../models/Mensaje";
 import { RealtimeChannel } from "@supabase/supabase-js";
 
 export class ChatUseCase {
-  private channel: RealtimeChannel | null = null;
+  private channelMensajes: RealtimeChannel | null = null;
+  private channelEscritura: RealtimeChannel | null = null; // Nuevo canal para escritura
 
-  // Obtener mensajes históricos
+  // --- Métodos para Mensajes (sin cambios) ---
   async obtenerMensajes(limite: number = 50): Promise<Mensaje[]> {
     try {
       const { data, error } = await supabase
@@ -16,19 +18,14 @@ export class ChatUseCase {
         `)
         .order("created_at", { ascending: false })
         .limit(limite);
-
       if (error) {
         console.error("Error al obtener mensajes:", error);
         throw error;
       }
-
-      // Mapear la respuesta para que tenga la estructura correcta
       const mensajesFormateados = (data || []).map((msg: any) => ({
         ...msg,
-        usuario: msg.usuarios // Renombrar usuarios a usuario
+        usuario: msg.usuarios
       }));
-
-      // Invertir el orden para mostrar del más antiguo al más reciente
       return mensajesFormateados.reverse() as Mensaje[];
     } catch (error) {
       console.error("Error al obtener mensajes:", error);
@@ -36,14 +33,15 @@ export class ChatUseCase {
     }
   }
 
-  // Enviar un nuevo mensaje
   async enviarMensaje(contenido: string): Promise<{ success: boolean; error?: string }> {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-
       if (!user) {
         return { success: false, error: "Usuario no autenticado" };
       }
+
+      // Opcional: Eliminar el evento de escritura del usuario al enviar un mensaje
+      await this.enviarEventoEscritura(false);
 
       const { error } = await supabase
         .from("mensajes")
@@ -51,9 +49,7 @@ export class ChatUseCase {
           contenido,
           usuario_id: user.id,
         });
-
       if (error) throw error;
-
       return { success: true };
     } catch (error: any) {
       console.error("Error al enviar mensaje:", error);
@@ -61,12 +57,89 @@ export class ChatUseCase {
     }
   }
 
-  // Suscribirse a nuevos mensajes en tiempo real
-  suscribirseAMensajes(callback: (mensaje: Mensaje) => void) {
-    // Crear canal único para esta suscripción
-    this.channel = supabase.channel('mensajes-channel');
+  // --- Nuevos Métodos para Indicador de Escritura ---
+  async enviarEventoEscritura(escribiendo: boolean) {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        console.log("Usuario no autenticado, no se envía evento de escritura.");
+        return;
+      }
 
-    this.channel
+      if (escribiendo) {
+         // Inserta un nuevo evento de escritura
+         const { error } = await supabase
+           .from("indicadores_escritura")
+           .insert({ usuario_id: user.id });
+         if (error) {
+           console.error("Error al enviar evento de escritura:", error);
+         }
+      } else {
+         // Opcional: Puedes limpiar eventos antiguos aquí si lo deseas,
+         // o dejar que se limpien con el temporizador en el cliente.
+         // Por ahora, solo enviamos el evento de inicio.
+      }
+    } catch (error) {
+      console.error("Error al enviar evento de escritura:", error);
+    }
+  }
+
+
+  suscribirseAEscritura(callback: (usuariosEscribiendo: string[]) => void) {
+    this.channelEscritura = supabase.channel('escritura-channel');
+
+    const usuariosEscritura = new Map<string, number>(); // Mapa: usuario_id -> timestamp del último evento
+
+    const limpiarInactivos = () => {
+      const ahora = Date.now();
+      let cambio = false;
+      usuariosEscritura.forEach((timestamp, userId) => {
+        if (ahora - timestamp > 3000) { // 3 segundos de inactividad
+          usuariosEscritura.delete(userId);
+          cambio = true;
+        }
+      });
+      if (cambio) {
+        callback(Array.from(usuariosEscritura.keys()));
+      }
+    };
+
+    // Iniciar temporizador para limpiar usuarios inactivos
+    const limpiarInterval = setInterval(limpiarInactivos, 1000); // Verificar cada segundo
+
+    this.channelEscritura
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT', // Escucha INSERT en la tabla indicadores_escritura
+          schema: 'public',
+          table: 'indicadores_escritura'
+        },
+        (payload) => {
+          const userId = payload.new.usuario_id;
+          const timestamp = Date.now();
+          usuariosEscritura.set(userId, timestamp);
+          callback(Array.from(usuariosEscritura.keys()));
+        }
+      )
+      .subscribe();
+
+    // Retornar función para desuscribirse y limpiar el temporizador
+    return () => {
+      if (this.channelEscritura) {
+        supabase.removeChannel(this.channelEscritura);
+        this.channelEscritura = null;
+      }
+      clearInterval(limpiarInterval);
+      usuariosEscritura.clear(); // Limpiar el mapa
+    };
+  }
+
+
+  // --- Método para suscribirse a mensajes (sin cambios, pero separamos canales) ---
+  suscribirseAMensajes(callback: (mensaje: Mensaje) => void) {
+    this.channelMensajes = supabase.channel('mensajes-channel-2'); // Diferenciar canal si es necesario
+    this.channelMensajes
       .on(
         'postgres_changes',
         {
@@ -76,9 +149,7 @@ export class ChatUseCase {
         },
         async (payload) => {
           console.log('📨 Nuevo mensaje recibido!', payload.new);
-
           try {
-            // Obtener información completa del mensaje con el usuario
             const { data, error } = await supabase
               .from("mensajes")
               .select(`
@@ -87,11 +158,8 @@ export class ChatUseCase {
               `)
               .eq('id', payload.new.id)
               .single();
-
             if (error) {
               console.error('⚠️ Error al obtener mensaje completo:', error);
-
-              // Fallback: usar los datos del payload si falla el JOIN
               const mensajeFallback: Mensaje = {
                 id: payload.new.id,
                 contenido: payload.new.contenido,
@@ -102,14 +170,10 @@ export class ChatUseCase {
                   rol: 'usuario'
                 }
               };
-
-              console.log('🔄 Usando mensaje fallback');
               callback(mensajeFallback);
               return;
             }
-
             if (data) {
-              // Formatear el mensaje
               const mensajeFormateado: Mensaje = {
                 id: data.id,
                 contenido: data.contenido,
@@ -117,13 +181,10 @@ export class ChatUseCase {
                 created_at: data.created_at,
                 usuario: data.usuarios || { email: 'Desconocido', rol: 'usuario' }
               };
-
               callback(mensajeFormateado);
             }
           } catch (err) {
             console.error('❌ Error inesperado:', err);
-
-            // Fallback final
             const mensajeFallback: Mensaje = {
               id: payload.new.id,
               contenido: payload.new.contenido,
@@ -134,34 +195,30 @@ export class ChatUseCase {
                 rol: 'usuario'
               }
             };
-
             callback(mensajeFallback);
           }
         }
       )
       .subscribe((status) => {
-        console.log('Estado de suscripción:', status);
+        console.log('Estado de suscripción mensajes:', status);
       });
 
-    // Retornar función para desuscribirse
     return () => {
-      if (this.channel) {
-        supabase.removeChannel(this.channel);
-        this.channel = null;
+      if (this.channelMensajes) {
+        supabase.removeChannel(this.channelMensajes);
+        this.channelMensajes = null;
       }
     };
   }
 
-  // Eliminar un mensaje (opcional)
+  // --- Método para eliminar mensaje (sin cambios) ---
   async eliminarMensaje(mensajeId: string): Promise<{ success: boolean; error?: string }> {
     try {
       const { error } = await supabase
         .from("mensajes")
         .delete()
         .eq('id', mensajeId);
-
       if (error) throw error;
-
       return { success: true };
     } catch (error: any) {
       console.error("Error al eliminar mensaje:", error);

@@ -1,3 +1,4 @@
+// app/(tabs)/chat.tsx
 import React, { useState, useRef, useEffect } from "react";
 import {
   View,
@@ -15,12 +16,11 @@ import { useAuth } from "@/src/presentation/hooks/useAuth";
 import { Mensaje } from "@/src/domain/models/Mensaje";
 
 export default function ChatScreen() {
-  const { mensajes, cargando, enviando, enviarMensaje } = useChat();
+  const { mensajes, cargando, enviando, enviarMensaje, usuariosEscribiendo, setInputTexto, inputTexto } = useChat(); // <-- Agregar nuevos valores del hook
   const { usuario } = useAuth();
-  const [textoMensaje, setTextoMensaje] = useState("");
+  // const [textoMensaje, setTextoMensaje] = useState(""); // <-- Remover estado local
   const flatListRef = useRef<FlatList>(null);
 
-  // Auto-scroll al final cuando llegan nuevos mensajes
   useEffect(() => {
     if (mensajes.length > 0) {
       flatListRef.current?.scrollToEnd({ animated: true });
@@ -28,23 +28,19 @@ export default function ChatScreen() {
   }, [mensajes]);
 
   const handleEnviar = async () => {
-    if (!textoMensaje.trim() || enviando) return;
-
-    const mensaje = textoMensaje;
-    setTextoMensaje(""); // Limpiar input inmediatamente
-
+    if (!inputTexto.trim() || enviando) return; // <-- Usar inputTexto del hook
+    const mensaje = inputTexto; // <-- Usar inputTexto del hook
+    setInputTexto(""); // <-- Limpiar usando setInputTexto del hook
     const resultado = await enviarMensaje(mensaje);
-
     if (!resultado.success) {
       alert("Error: " + resultado.error);
-      setTextoMensaje(mensaje); // Restaurar mensaje si falló
+      setInputTexto(mensaje); // <-- Restaurar si falla
     }
   };
 
   const renderMensaje = ({ item }: { item: Mensaje }) => {
     const esMio = item.usuario_id === usuario?.id;
     const emailUsuario = item.usuario?.email || "Usuario desconocido";
-
     return (
       <View
         style={[
@@ -74,6 +70,35 @@ export default function ChatScreen() {
     );
   };
 
+  // --- Nuevo componente para mostrar usuarios escribiendo ---
+  const renderUsuariosEscribiendo = () => {
+    if (usuariosEscribiendo.length === 0) return null;
+
+    // Opcional: Filtrar el usuario actual si está escribiendo
+    const otrosUsuariosEscribiendo = usuariosEscribiendo.filter(id => id !== usuario?.id);
+
+    if (otrosUsuariosEscribiendo.length === 0) return null;
+
+    // Aquí necesitas mapear los IDs a emails si no lo hiciste en el hook.
+    // Si el hook solo devuelve IDs, puedes mostrar un placeholder o un nombre genérico.
+    // Para una implementación completa, necesitarías una función para obtener emails por ID.
+    // Por ahora, mostraremos un placeholder indicando cuántos usuarios están escribiendo.
+    // En una app real, lo ideal es tener una función como `useUsuarios()` que proporcione
+    // una función `getEmailById(id)` o una lista de usuarios activos.
+
+    // Placeholder simple:
+    const texto = otrosUsuariosEscribiendo.length === 1 ? "está escribiendo..." : "están escribiendo...";
+
+    return (
+      <View style={styles.indicadorEscrituraContainer}>
+        <Text style={styles.indicadorEscrituraTexto}>
+          {/* {otrosUsuariosEscribiendo[0]} {texto} */} {/* Si tuvieras los emails */}
+          {otrosUsuariosEscribiendo.length} usuario(s) {texto}
+        </Text>
+      </View>
+    );
+  };
+
   if (cargando) {
     return (
       <View style={styles.centrado}>
@@ -96,13 +121,13 @@ export default function ChatScreen() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.listContainer}
         onContentSizeChange={() => flatListRef.current?.scrollToEnd()}
+        ListFooterComponent={renderUsuariosEscribiendo} // <-- Añadir el indicador como footer
       />
-
       <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
-          value={textoMensaje}
-          onChangeText={setTextoMensaje}
+          value={inputTexto} // <-- Conectar valor al estado del hook
+          onChangeText={setInputTexto} // <-- Conectar cambio al estado del hook
           placeholder="Escribe un mensaje..."
           multiline
           maxLength={500}
@@ -110,10 +135,10 @@ export default function ChatScreen() {
         <TouchableOpacity
           style={[
             styles.botonEnviar,
-            (!textoMensaje.trim() || enviando) && styles.botonDeshabilitado,
+            (!inputTexto.trim() || enviando) && styles.botonDeshabilitado, // <-- Usar inputTexto del hook
           ]}
           onPress={handleEnviar}
-          disabled={!textoMensaje.trim() || enviando}
+          disabled={!inputTexto.trim() || enviando} // <-- Usar inputTexto del hook
         >
           <Text style={styles.textoBotonEnviar}>
             {enviando ? "..." : "Enviar"}
@@ -125,6 +150,7 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
+  // ... estilos existentes ...
   container: {
     flex: 1,
     backgroundColor: "#F5F5F5",
@@ -213,4 +239,15 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     fontSize: 16,
   },
+  // --- Nuevos estilos para el indicador de escritura ---
+  indicadorEscrituraContainer: {
+    padding: 8,
+    alignItems: 'flex-start', // Alinea el texto a la izquierda
+  },
+  indicadorEscrituraTexto: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: '#666',
+  },
+  // ...
 });
